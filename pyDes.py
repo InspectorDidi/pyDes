@@ -28,8 +28,8 @@
 
 Class initialization
 --------------------
-pyDes.des(key, [mode], [IV], [pad], [padmode])
-pyDes.triple_des(key, [mode], [IV], [pad], [padmode])
+pyDes.des(key, [mode], [IV], [pad], [padmode], [hs])
+pyDes.triple_des(key, [mode], [IV], [pad], [padmode], [hs])
 
 key     -> Bytes containing the encryption key. 8 bytes for DES, 16 or 24 bytes
 	   for Triple DES
@@ -41,6 +41,7 @@ pad     -> Optional argument, set the pad character (PAD_NORMAL) to use during
 	   all encrypt/decrypt operations done with this instance.
 padmode -> Optional argument, set the padding mode (PAD_NORMAL or PAD_PKCS5)
 	   to use during all encrypt/decrypt operations done with this instance.
+hs      -> Optional boolean argument, special version "reverse endianness" algo for HiSilicon Firmware (useful for cross-running to ARM big-endian platforms on traditional Intel little-endian arch)
 
 I recommend to use PAD_PKCS5 padding, as then you never need to worry about any
 padding issues, as the padding can be removed unambiguously upon decrypting
@@ -394,11 +395,12 @@ class des(_baseDes):
 	DECRYPT =	0x01
 
 	# Initialisation
-	def __init__(self, key, mode=ECB, IV=None, pad=None, padmode=PAD_NORMAL):
+	def __init__(self, key, mode=ECB, IV=None, pad=None, padmode=PAD_NORMAL, hs=False):
 		# Sanity checking of arguments.
 		if len(key) != 8:
 			raise ValueError("Invalid DES key size. Key must be exactly 8 bytes long.")
 		_baseDes.__init__(self, mode, IV, pad, padmode)
+		self.hs = hs
 		self.key_size = 8
 
 		self.L = []
@@ -422,15 +424,19 @@ class des(_baseDes):
 		l = len(data) * 8
 		result = [0] * l
 		pos = 0
+		if self.hs:
+			i0, idelta = 0, 1
+		else:
+			i0, idelta = 7, -1
 		for ch in data:
-			i = 7
-			while i >= 0:
+			i = i0
+			while (i >= 0) and (i <= 7):
 				if ch & (1 << i) != 0:
 					result[pos] = 1
 				else:
 					result[pos] = 0
 				pos += 1
-				i -= 1
+				i += idelta
 
 		return result
 
@@ -439,8 +445,12 @@ class des(_baseDes):
 		result = []
 		pos = 0
 		c = 0
+		if self.hs:
+			i0, imul = 0, 1
+		else:
+			i0, imul = 7, -1
 		while pos < len(data):
-			c += data[pos] << (7 - (pos % 8))
+			c += data[pos] << (i0 + imul * (pos % 8))
 			if (pos % 8) == 7:
 				result.append(c)
 				c = 0
@@ -496,7 +506,14 @@ class des(_baseDes):
 		else:
 			iteration = 15
 			iteration_adjustment = -1
+			if self.hs:
+				self.L = block[32:]
+				self.R = block[:32]
 
+		if self.hs:
+			dn = [3, 2, 1, 0]
+		else:
+			dn = [0, 1, 2, 3]
 		i = 0
 		while i < 16:
 			# Make a copy of R[i-1], this will later become L[i]
@@ -530,10 +547,10 @@ class des(_baseDes):
 				v = des.__sbox[j][(m << 4) + n]
 
 				# Turn value into bits, add it to result: Bn
-				Bn[pos] = (v & 8) >> 3
-				Bn[pos + 1] = (v & 4) >> 2
-				Bn[pos + 2] = (v & 2) >> 1
-				Bn[pos + 3] = v & 1
+				Bn[pos + dn[0]] = (v & 8) >> 3
+				Bn[pos + dn[1]] = (v & 4) >> 2
+				Bn[pos + dn[2]] = (v & 2) >> 1
+				Bn[pos + dn[3]] = v & 1
 
 				pos += 4
 				j += 1
@@ -556,7 +573,11 @@ class des(_baseDes):
 			iteration += iteration_adjustment
 		
 		# Final permutation of R[16]L[16]
-		self.final = self.__permutate(des.__fp, self.R + self.L)
+		if self.hs and crypt_type == des.ENCRYPT:
+			RL = self.L + self.R
+		else:
+			RL = self.R + self.L
+		self.final = self.__permutate(des.__fp, RL)
 		return self.final
 
 
@@ -705,8 +726,9 @@ class triple_des(_baseDes):
 		PAD_PKCS5) to use during all encrypt/decrypt operations done
 		with this instance.
 	"""
-	def __init__(self, key, mode=ECB, IV=None, pad=None, padmode=PAD_NORMAL):
+	def __init__(self, key, mode=ECB, IV=None, pad=None, padmode=PAD_NORMAL, hs=False):
 		_baseDes.__init__(self, mode, IV, pad, padmode)
+		self.hs = hs
 		self.setKey(key)
 
 	def setKey(self, key):
@@ -724,14 +746,14 @@ class triple_des(_baseDes):
 			if len(self.getIV()) != self.block_size:
 				raise ValueError("Invalid IV, must be 8 bytes in length")
 		self.__key1 = des(key[:8], self._mode, self._iv,
-				  self._padding, self._padmode)
+				  self._padding, self._padmode, self.hs)
 		self.__key2 = des(key[8:16], self._mode, self._iv,
-				  self._padding, self._padmode)
+				  self._padding, self._padmode, self.hs)
 		if self.key_size == 16:
 			self.__key3 = self.__key1
 		else:
 			self.__key3 = des(key[16:], self._mode, self._iv,
-					  self._padding, self._padmode)
+					  self._padding, self._padmode, self.hs)
 		_baseDes.setKey(self, key)
 
 	# Override setter methods to work on all 3 keys.
